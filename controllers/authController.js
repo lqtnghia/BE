@@ -139,7 +139,7 @@ const verifyOTP = async (req, res) => {
     const accessToken = jwt.sign(
       { userId: user.id, email: user.email },
       ACCESS_TOKEN_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: "5h" }
     );
     const refreshToken = jwt.sign(
       { userId: user.id, email: user.email },
@@ -488,7 +488,7 @@ const searchUsers = async (req, res) => {
   try {
     console.log("Step 1 - Verify token");
     const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
-    const currentUserId = decoded.userId;
+    const currentUserId = decoded.userId; // Không ép kiểu thành chuỗi
     console.log("Step 2 - Current user ID:", currentUserId);
 
     const { searchQuery } = req.params;
@@ -509,6 +509,9 @@ const searchUsers = async (req, res) => {
 
     console.log("Step 4 - Get database connection");
     connection = await db.getConnection();
+    console.log("Step 4.1 - Check current database");
+    const [dbCheck] = await connection.execute("SELECT DATABASE() as db");
+    console.log("Step 4.2 - Current database:", dbCheck[0].db);
 
     console.log("Step 5 - Count total users");
     const [totalResult] = await connection.execute(
@@ -531,7 +534,7 @@ const searchUsers = async (req, res) => {
     ]);
     console.log("Step 8 - Found users:", users);
 
-    const userIds = users.map((user) => user.id);
+    const userIds = users.map((user) => parseInt(user.id, 10)); // Đảm bảo userIds là số
     console.log("Step 9 - User IDs:", userIds);
 
     let friends = [];
@@ -540,47 +543,56 @@ const searchUsers = async (req, res) => {
 
     if (userIds.length > 0) {
       console.log("Step 10 - Check friends");
-      for (const userId of userIds) {
-        console.log(`Step 10.1 - Checking friends for userId: ${userId}`);
-        const [friendRows] = await connection.execute(
-          "SELECT userId, friendId FROM friends WHERE (userId = ? AND friendId = ?) OR (friendId = ? AND userId = ?)",
-          [currentUserId, userId, currentUserId, userId]
-        );
-        console.log(
-          `Step 10.2 - Friend rows for userId ${userId}:`,
-          friendRows
-        );
-        friends.push(...friendRows);
-      }
+      const [friendRows] = await connection.execute(
+        "SELECT userId, friendId FROM friends WHERE (userId = ? AND friendId IN (" +
+          userIds.map(() => "?").join(",") +
+          ")) OR (friendId = ? AND userId IN (" +
+          userIds.map(() => "?").join(",") +
+          "))",
+        [currentUserId, ...userIds, currentUserId, ...userIds]
+      );
+      friends = friendRows;
       console.log("Step 11 - Friends:", friends);
 
       console.log("Step 12 - Check sent friend requests");
-      for (const userId of userIds) {
-        console.log(`Step 12.1 - Checking sent requests for userId: ${userId}`);
-        const [sentRows] = await connection.execute(
-          "SELECT senderId, receiverId FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
-          [currentUserId, userId]
-        );
-        console.log(`Step 12.2 - Sent rows for userId ${userId}:`, sentRows);
-        sentRequests.push(...sentRows);
-      }
+      console.log("Step 12.1 - Query params:", {
+        currentUserId: currentUserId,
+        userIds: userIds
+      });
+      const sentQuery =
+        "SELECT senderId, receiverId FROM friend_requests WHERE senderId = ? AND receiverId IN (" +
+        userIds.map(() => "?").join(",") +
+        ") AND status = ?";
+      console.log("Step 12.2 - Sent query:", sentQuery);
+      console.log("Step 12.3 - Query values:", [
+        currentUserId,
+        ...userIds,
+        "pending"
+      ]);
+      const [sentRows] = await connection.execute(sentQuery, [
+        currentUserId,
+        ...userIds,
+        "pending"
+      ]);
+      sentRequests = sentRows;
       console.log("Step 13 - Sent requests:", sentRequests);
+      console.log(
+        "Step 13.1 - Sent requests map:",
+        sentRequests.map((req) => req.receiverId)
+      );
 
       console.log("Step 14 - Check received friend requests");
-      for (const userId of userIds) {
-        console.log(
-          `Step 14.1 - Checking received requests for userId: ${userId}`
-        );
-        const [receivedRows] = await connection.execute(
-          "SELECT senderId, receiverId FROM friend_requests WHERE receiverId = ? AND senderId = ? AND status = 'pending'",
-          [currentUserId, userId]
-        );
-        console.log(
-          `Step 14.2 - Received rows for userId ${userId}:`,
-          receivedRows
-        );
-        receivedRequests.push(...receivedRows);
-      }
+      const receivedQuery =
+        "SELECT senderId, receiverId FROM friend_requests WHERE receiverId = ? AND senderId IN (" +
+        userIds.map(() => "?").join(",") +
+        ") AND status = ?";
+      console.log("Step 14.1 - Received query:", receivedQuery);
+      const [receivedRows] = await connection.execute(receivedQuery, [
+        currentUserId,
+        ...userIds,
+        "pending"
+      ]);
+      receivedRequests = receivedRows;
       console.log("Step 15 - Received requests:", receivedRequests);
     } else {
       console.log("Step 10 - No user IDs, skipping relationship checks");
@@ -589,17 +601,16 @@ const searchUsers = async (req, res) => {
     const friendsMap = new Set();
     friends.forEach((friend) => {
       if (friend.userId === currentUserId) {
-        friendsMap.add(friend.friendId.toString());
-      } else {
-        friendsMap.add(friend.userId.toString());
+        friendsMap.add(friend.friendId);
+      } else if (friend.friendId === currentUserId) {
+        friendsMap.add(friend.userId);
       }
     });
+    console.log("Step 15.1 - Friends map:", Array.from(friendsMap));
 
-    const sentRequestsMap = new Set(
-      sentRequests.map((req) => req.receiverId.toString())
-    );
+    const sentRequestsMap = new Set(sentRequests.map((req) => req.receiverId));
     const receivedRequestsMap = new Set(
-      receivedRequests.map((req) => req.senderId.toString())
+      receivedRequests.map((req) => req.senderId)
     );
 
     const formattedUsers = users.map((user) => ({
@@ -607,9 +618,9 @@ const searchUsers = async (req, res) => {
       fullName: user.fullName,
       image: user.imageAva ? `/uploads/${user.imageAva}` : null,
       imagePublicId: user.imagePublicId || null,
-      isFriend: friendsMap.has(user.id.toString()),
-      requestSent: sentRequestsMap.has(user.id.toString()),
-      requestReceived: receivedRequestsMap.has(user.id.toString())
+      isFriend: friendsMap.has(user.id),
+      requestSent: sentRequestsMap.has(user.id),
+      requestReceived: receivedRequestsMap.has(user.id)
     }));
 
     console.log("Step 16 - Formatted users:", formattedUsers);
@@ -637,6 +648,163 @@ const searchUsers = async (req, res) => {
   }
 };
 
+// SendFriendRequest
+const sendFriendRequest = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("Missing or invalid Authorization header");
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+  try {
+    console.log("Step 1 - Verify token");
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const currentUserId = decoded.userId; // Không ép kiểu thành chuỗi
+    console.log("Step 2 - Current user ID:", currentUserId);
+
+    const { friendId } = req.body;
+    console.log("Step 3 - Friend ID:", friendId);
+
+    if (!friendId) {
+      console.log("friendId is required");
+      return res.status(400).json({ message: "friendId là bắt buộc" });
+    }
+
+    const friendIdNum = parseInt(friendId, 10); // Chuyển friendId thành số
+    if (isNaN(friendIdNum)) {
+      console.log("Invalid friendId");
+      return res.status(400).json({ message: "friendId không hợp lệ" });
+    }
+
+    if (friendIdNum === currentUserId) {
+      console.log("Cannot send friend request to yourself");
+      return res
+        .status(400)
+        .json({ message: "Không thể gửi yêu cầu kết bạn cho chính mình" });
+    }
+
+    console.log("Step 4 - Get database connection");
+    connection = await db.getConnection();
+
+    console.log("Step 5 - Check if friendId exists");
+    const [friendRows] = await connection.execute(
+      "SELECT id FROM users WHERE id = ?",
+      [friendIdNum]
+    );
+    if (friendRows.length === 0) {
+      console.log("Friend not found");
+      return res.status(400).json({ message: "Người dùng không tồn tại" });
+    }
+
+    console.log("Step 6 - Check if already friends");
+    const [friendshipRows] = await connection.execute(
+      "SELECT * FROM friends WHERE (userId = ? AND friendId = ?) OR (userId = ? AND friendId = ?)",
+      [currentUserId, friendIdNum, friendIdNum, currentUserId]
+    );
+    if (friendshipRows.length > 0) {
+      console.log("Already friends");
+      return res.status(400).json({ message: "Hai người đã là bạn bè" });
+    }
+
+    console.log("Step 7 - Check if request already exists");
+    const [requestRows] = await connection.execute(
+      "SELECT * FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
+      [currentUserId, friendIdNum]
+    );
+    if (requestRows.length > 0) {
+      console.log("Friend request already sent");
+      return res
+        .status(400)
+        .json({ message: "Yêu cầu kết bạn đã được gửi trước đó" });
+    }
+
+    console.log("Step 8 - Send friend request");
+    await connection.execute(
+      "INSERT INTO friend_requests (senderId, receiverId, status, createdAt, updatedAt) VALUES (?, ?, 'pending', NOW(), NOW())",
+      [currentUserId, friendIdNum]
+    );
+
+    console.log("Step 9 - Friend request sent successfully");
+    res.status(200).json({ message: "Friend request sent successfully." });
+  } catch (error) {
+    console.error("Lỗi gửi yêu cầu kết bạn:", {
+      error: error.message,
+      stack: error.stack
+    });
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Lấy danh sách yêu cầu kết bạn đang chờ xử lý
+const getPendingFriendRequests = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("Missing or invalid Authorization header");
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+  try {
+    console.log("Step 1 - Verify token");
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const currentUserId = decoded.userId;
+    console.log("Step 2 - Current user ID:", currentUserId);
+
+    console.log("Step 3 - Get database connection");
+    connection = await db.getConnection();
+
+    console.log("Step 4 - Fetch pending friend requests");
+    const [requestRows] = await connection.execute(
+      `SELECT fr.id, fr.senderId, fr.createdAt, 
+              u.id AS userId, u.fullName, u.imageAva 
+       FROM friend_requests fr 
+       JOIN users u ON fr.senderId = u.id 
+       WHERE fr.receiverId = ? AND fr.status = 'pending' 
+       ORDER BY fr.createdAt DESC`,
+      [currentUserId]
+    );
+    console.log("Step 5 - Pending requests:", requestRows);
+
+    const formattedRequests = requestRows.map((request) => ({
+      id: request.id.toString(),
+      sender: {
+        id: request.userId.toString(),
+        fullName: request.fullName,
+        image: request.imageAva ? `/uploads/${request.imageAva}` : null
+      },
+      createdAt: new Date(request.createdAt).toISOString()
+    }));
+
+    console.log("Step 6 - Formatted pending requests:", formattedRequests);
+    res.status(200).json(formattedRequests);
+  } catch (error) {
+    console.error("Lỗi lấy danh sách yêu cầu kết bạn đang chờ:", {
+      error: error.message,
+      stack: error.stack
+    });
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   signup,
   login,
@@ -645,5 +813,7 @@ module.exports = {
   getAuthUser,
   createPost,
   getPosts,
-  searchUsers
+  searchUsers,
+  sendFriendRequest,
+  getPendingFriendRequests
 };
