@@ -103,17 +103,85 @@ const login = async (req, res) => {
   }
 };
 
+// Quên mật khẩu và gửi email đặt lại mật khẩu
+const forgotPassword = async (req, res) => {
+  const { email } = req.body;
+
+  // Kiểm tra xem email có được cung cấp hay không
+  if (!email) {
+    return res.status(400).json({ message: "Email là bắt buộc" });
+  }
+
+  let connection;
+  try {
+    // Kết nối với cơ sở dữ liệu
+    connection = await db.getConnection();
+
+    // Kiểm tra xem người dùng có tồn tại không
+    const [rows] = await connection.execute(
+      "SELECT * FROM users WHERE email = ?",
+      [email]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Người dùng không tồn tại" });
+    }
+
+    const user = rows[0];
+
+    // Xóa các OTP hoặc token đặt lại mật khẩu cũ (nếu có)
+    await connection.execute("DELETE FROM otps WHERE email = ?", [email]);
+
+    // Tạo OTP hoặc token đặt lại mật khẩu
+    const resetToken = generateOTP(); // Sử dụng hàm generateOTP đã có
+    const tokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // Hết hạn sau 10 phút
+
+    // Lưu token vào cơ sở dữ liệu
+    await connection.execute(
+      "INSERT INTO otps (userId, email, otp, expiry) VALUES (?, ?, ?, ?)",
+      [user.id, email, resetToken, tokenExpiry]
+    );
+
+    // Gửi email đặt lại mật khẩu
+    const mailOptions = {
+      from: process.env.EMAIL_USER || "your_email@gmail.com",
+      to: email,
+      subject: "Đặt lại mật khẩu",
+      text: `Mã đặt lại mật khẩu của bạn là: ${resetToken}. Mã sẽ hết hạn sau 10 phút.`
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    // Trả về phản hồi thành công
+    res
+      .status(200)
+      .json({ message: "Password reset email sent successfully." });
+  } catch (error) {
+    console.error("Lỗi quên mật khẩu:", error);
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 // Xác minh OTP để đăng nhập
 const verifyOTP = async (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp, flow } = req.body;
 
-  if (!email || !otp) {
-    return res.status(400).json({ message: "Thiếu email hoặc OTP" });
+  // Kiểm tra các trường bắt buộc
+  if (!email || !otp || !flow) {
+    return res.status(400).json({ message: "Thiếu email, OTP hoặc flow" });
+  }
+
+  // Kiểm tra giá trị của flow
+  if (!["login", "forgot-password"].includes(flow)) {
+    return res.status(400).json({ message: "Giá trị flow không hợp lệ" });
   }
 
   let connection;
   try {
     connection = await db.getConnection();
+
+    // Kiểm tra OTP
     const [rows] = await connection.execute(
       "SELECT * FROM otps WHERE email = ? AND otp = ? AND expiry > NOW()",
       [email, otp]
@@ -122,6 +190,13 @@ const verifyOTP = async (req, res) => {
       return res.status(401).json({ message: "OTP hoặc email không hợp lệ" });
     }
 
+    // Xóa OTP sau khi xác minh thành công
+    await connection.execute("DELETE FROM otps WHERE email = ? AND otp = ?", [
+      email,
+      otp
+    ]);
+
+    // Kiểm tra người dùng
     const [userRows] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
@@ -131,34 +206,38 @@ const verifyOTP = async (req, res) => {
     }
     const user = userRows[0];
 
-    await connection.execute("DELETE FROM otps WHERE email = ? AND otp = ?", [
-      email,
-      otp
-    ]);
+    if (flow === "login") {
+      // Flow login: Tạo accessToken và refreshToken
+      const accessToken = jwt.sign(
+        { userId: user.id, email: user.email },
+        process.env.ACCESS_TOKEN_SECRET, // Sử dụng biến môi trường
+        { expiresIn: "5h" }
+      );
+      const refreshToken = jwt.sign(
+        { userId: user.id, email: user.email },
+        process.env.REFRESH_TOKEN_SECRET, // Sử dụng biến môi trường
+        { expiresIn: "7d" }
+      );
 
-    const accessToken = jwt.sign(
-      { userId: user.id, email: user.email },
-      ACCESS_TOKEN_SECRET,
-      { expiresIn: "5h" }
-    );
-    const refreshToken = jwt.sign(
-      { userId: user.id, email: user.email },
-      REFRESH_TOKEN_SECRET,
-      { expiresIn: "7d" }
-    );
+      // Lưu refreshToken vào database
+      const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 ngày
+      await connection.execute(
+        "INSERT INTO refresh_tokens (userId, token, expiry) VALUES (?, ?, ?)",
+        [user.id, refreshToken, tokenExpiry]
+      );
 
-    const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    await connection.execute(
-      "INSERT INTO refresh_tokens (userId, token, expiry) VALUES (?, ?, ?)",
-      [user.id, refreshToken, tokenExpiry]
-    );
-
-    res.status(200).json({
-      message: "Đăng nhập thành công",
-      accessToken,
-      refreshToken,
-      user: { id: user.id, fullName: user.fullName, email: user.email }
-    });
+      return res.status(200).json({
+        message: "Đăng nhập thành công",
+        accessToken,
+        refreshToken,
+        user: { id: user.id, fullName: user.fullName, email: user.email }
+      });
+    } else if (flow === "forgot-password") {
+      // Flow forgot password: Chỉ trả về thông báo thành công
+      return res.status(200).json({
+        message: "Xác minh OTP thành công"
+      });
+    }
   } catch (error) {
     console.error("Lỗi xác minh OTP:", error);
     res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
@@ -204,7 +283,7 @@ const refreshToken = async (req, res) => {
     const newAccessToken = jwt.sign(
       { userId: user.id, email: user.email },
       ACCESS_TOKEN_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: "5h" }
     );
     const newRefreshToken = jwt.sign(
       { userId: user.id, email: user.email },
@@ -815,5 +894,6 @@ module.exports = {
   getPosts,
   searchUsers,
   sendFriendRequest,
-  getPendingFriendRequests
+  getPendingFriendRequests,
+  forgotPassword
 };

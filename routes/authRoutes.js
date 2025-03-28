@@ -26,5 +26,6 @@ router.get("/posts", authController.getPosts);
 router.get("/search/users/:searchQuery", authController.searchUsers);
 router.post("/friends/request", authController.sendFriendRequest);
 router.get("/friends/pending", authController.getPendingFriendRequests);
+router.post("/forgot-password", authController.forgotPassword);
 
 module.exports = router;
