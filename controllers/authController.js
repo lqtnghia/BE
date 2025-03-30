@@ -163,6 +163,66 @@ const forgotPassword = async (req, res) => {
   }
 };
 
+// Reset mật khẩu
+const resetPassword = async (req, res) => {
+  const { email, password } = req.body;
+
+  // Kiểm tra các trường bắt buộc
+  if (!email || !password) {
+    return res.status(400).json({ message: "Email và mật khẩu là bắt buộc" });
+  }
+
+  let connection;
+  try {
+    connection = await db.getConnection();
+
+    // Kiểm tra xem email có OTP hợp lệ không
+    const [otpRows] = await connection.execute(
+      "SELECT * FROM otps WHERE email = ? AND expiry > NOW()",
+      [email]
+    );
+    if (otpRows.length === 0) {
+      return res
+        .status(401)
+        .json({ message: "Bạn cần xác thực OTP trước khi reset mật khẩu" });
+    }
+
+    // Kiểm tra xem người dùng có tồn tại không
+    const [rows] = await connection.execute(
+      "SELECT * FROM users WHERE email = ?",
+      [email]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Người dùng không tồn tại" });
+    }
+
+    // Băm mật khẩu mới
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Cập nhật mật khẩu mới vào bảng users
+    const [updateResult] = await connection.execute(
+      "UPDATE users SET password = ? WHERE email = ?",
+      [hashedPassword, email]
+    );
+
+    // Kiểm tra xem truy vấn có cập nhật thành công không
+    if (updateResult.affectedRows === 0) {
+      return res.status(500).json({ message: "Không thể cập nhật mật khẩu" });
+    }
+
+    // Xóa OTP sau khi reset mật khẩu thành công
+    await connection.execute("DELETE FROM otps WHERE email = ?", [email]);
+
+    // Trả về phản hồi thành công
+    res.status(200).json({ message: "Password reset successfully." });
+  } catch (error) {
+    console.error("Lỗi reset mật khẩu:", error);
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 // Xác minh OTP để đăng nhập
 const verifyOTP = async (req, res) => {
   const { email, otp, flow } = req.body;
@@ -190,11 +250,7 @@ const verifyOTP = async (req, res) => {
       return res.status(401).json({ message: "OTP hoặc email không hợp lệ" });
     }
 
-    // Xóa OTP sau khi xác minh thành công
-    await connection.execute("DELETE FROM otps WHERE email = ? AND otp = ?", [
-      email,
-      otp
-    ]);
+    // Không xóa OTP ở đây, để resetPassword xử lý nếu flow là forgot-password
 
     // Kiểm tra người dùng
     const [userRows] = await connection.execute(
@@ -210,12 +266,12 @@ const verifyOTP = async (req, res) => {
       // Flow login: Tạo accessToken và refreshToken
       const accessToken = jwt.sign(
         { userId: user.id, email: user.email },
-        process.env.ACCESS_TOKEN_SECRET, // Sử dụng biến môi trường
+        process.env.ACCESS_TOKEN_SECRET,
         { expiresIn: "5h" }
       );
       const refreshToken = jwt.sign(
         { userId: user.id, email: user.email },
-        process.env.REFRESH_TOKEN_SECRET, // Sử dụng biến môi trường
+        process.env.REFRESH_TOKEN_SECRET,
         { expiresIn: "7d" }
       );
 
@@ -225,6 +281,12 @@ const verifyOTP = async (req, res) => {
         "INSERT INTO refresh_tokens (userId, token, expiry) VALUES (?, ?, ?)",
         [user.id, refreshToken, tokenExpiry]
       );
+
+      // Xóa OTP sau khi đăng nhập thành công (flow login)
+      await connection.execute("DELETE FROM otps WHERE email = ? AND otp = ?", [
+        email,
+        otp
+      ]);
 
       return res.status(200).json({
         message: "Đăng nhập thành công",
@@ -240,6 +302,82 @@ const verifyOTP = async (req, res) => {
     }
   } catch (error) {
     console.error("Lỗi xác minh OTP:", error);
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Thay đổi mật khẩu
+const changePassword = async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  const authHeader = req.headers.authorization;
+
+  // Kiểm tra header Authorization
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+  try {
+    // Xác thực token
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
+
+    // Kiểm tra các trường bắt buộc
+    if (!oldPassword || !newPassword) {
+      return res
+        .status(400)
+        .json({ message: "Mật khẩu cũ và mới là bắt buộc" });
+    }
+
+    connection = await db.getConnection();
+
+    // Lấy thông tin người dùng
+    const [rows] = await connection.execute(
+      "SELECT * FROM users WHERE id = ?",
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Người dùng không tồn tại" });
+    }
+
+    const user = rows[0];
+
+    // Kiểm tra mật khẩu cũ
+    const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: "Mật khẩu cũ không đúng" });
+    }
+
+    // Băm mật khẩu mới
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+    // Cập nhật mật khẩu mới
+    const [updateResult] = await connection.execute(
+      "UPDATE users SET password = ? WHERE id = ?",
+      [hashedNewPassword, userId]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(500).json({ message: "Không thể cập nhật mật khẩu" });
+    }
+
+    // (Tùy chọn) Xóa refresh token để yêu cầu đăng nhập lại
+    await connection.execute("DELETE FROM refresh_tokens WHERE userId = ?", [
+      userId
+    ]);
+
+    res.status(200).json({ message: "Password changed successfully." });
+  } catch (error) {
+    console.error("Lỗi đổi mật khẩu:", error);
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
     res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
   } finally {
     if (connection) connection.release();
@@ -895,5 +1033,7 @@ module.exports = {
   searchUsers,
   sendFriendRequest,
   getPendingFriendRequests,
-  forgotPassword
+  forgotPassword,
+  resetPassword,
+  changePassword
 };
