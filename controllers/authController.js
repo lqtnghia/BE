@@ -878,7 +878,7 @@ const sendFriendRequest = async (req, res) => {
   try {
     console.log("Step 1 - Verify token");
     const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
-    const currentUserId = decoded.userId; // Không ép kiểu thành chuỗi
+    const currentUserId = decoded.userId;
     console.log("Step 2 - Current user ID:", currentUserId);
 
     const { friendId } = req.body;
@@ -889,7 +889,7 @@ const sendFriendRequest = async (req, res) => {
       return res.status(400).json({ message: "friendId là bắt buộc" });
     }
 
-    const friendIdNum = parseInt(friendId, 10); // Chuyển friendId thành số
+    const friendIdNum = parseInt(friendId, 10);
     if (isNaN(friendIdNum)) {
       console.log("Invalid friendId");
       return res.status(400).json({ message: "friendId không hợp lệ" });
@@ -907,7 +907,7 @@ const sendFriendRequest = async (req, res) => {
 
     console.log("Step 5 - Check if friendId exists");
     const [friendRows] = await connection.execute(
-      "SELECT id FROM users WHERE id = ?",
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
       [friendIdNum]
     );
     if (friendRows.length === 0) {
@@ -937,11 +937,77 @@ const sendFriendRequest = async (req, res) => {
         .json({ message: "Yêu cầu kết bạn đã được gửi trước đó" });
     }
 
+    // console.log("Step 8 - Send friend request");
+    // const [result] = await connection.execute(
+    //   "INSERT INTO friend_requests (senderId, receiverId, status, createdAt, updatedAt) VALUES (?, ?, 'pending', NOW(), NOW())",
+    //   [currentUserId, friendIdNum]
+    // );
+
+    // // Lấy thông tin người gửi
+    // const [senderRows] = await connection.execute(
+    //   "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+    //   [currentUserId]
+    // );
+    // const sender = senderRows[0];
+
+    // // Dữ liệu lời mời kết bạn
+    // const friendRequestData = {
+    //   id: result.insertId.toString(),
+    //   sender: {
+    //     id: sender.id.toString(),
+    //     fullName: sender.fullName,
+    //     image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
+    //   },
+    //   createdAt: new Date().toISOString()
+    // };
+
+    // // Phát sự kiện tới người nhận
+    // req.io
+    //   .to(friendIdNum.toString())
+    //   .emit("newFriendRequest", friendRequestData);
+
+    // // Phát sự kiện tới người gửi (nếu cần hiển thị trong FriendRequest của người gửi)
+    // req.io.to(currentUserId.toString()).emit("friendRequestSent", {
+    //   receiverId: friendIdNum.toString(),
+    //   ...friendRequestData
+    // });
+
+    // console.log("Step 9 - Friend request sent successfully");
+    // res.status(200).json({ message: "Friend request sent successfully." });
     console.log("Step 8 - Send friend request");
-    await connection.execute(
+    const [result] = await connection.execute(
       "INSERT INTO friend_requests (senderId, receiverId, status, createdAt, updatedAt) VALUES (?, ?, 'pending', NOW(), NOW())",
       [currentUserId, friendIdNum]
     );
+
+    // Lấy thông tin người gửi
+    const [senderRows] = await connection.execute(
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+      [currentUserId]
+    );
+    const sender = senderRows[0];
+
+    // Dữ liệu lời mời kết bạn
+    const friendRequestData = {
+      id: result.insertId.toString(),
+      sender: {
+        id: sender.id.toString(),
+        fullName: sender.fullName,
+        image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
+      },
+      createdAt: new Date().toISOString()
+    };
+
+    // Phát sự kiện tới người nhận
+    req.io
+      .to(friendIdNum.toString())
+      .emit("newFriendRequest", friendRequestData);
+
+    // Phát sự kiện tới người gửi (nếu cần hiển thị trong FriendRequest của người gửi)
+    req.io.to(currentUserId.toString()).emit("friendRequestSent", {
+      receiverId: friendIdNum.toString(),
+      ...friendRequestData
+    });
 
     console.log("Step 9 - Friend request sent successfully");
     res.status(200).json({ message: "Friend request sent successfully." });
