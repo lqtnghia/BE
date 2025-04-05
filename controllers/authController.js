@@ -937,43 +937,6 @@ const sendFriendRequest = async (req, res) => {
         .json({ message: "Yêu cầu kết bạn đã được gửi trước đó" });
     }
 
-    // console.log("Step 8 - Send friend request");
-    // const [result] = await connection.execute(
-    //   "INSERT INTO friend_requests (senderId, receiverId, status, createdAt, updatedAt) VALUES (?, ?, 'pending', NOW(), NOW())",
-    //   [currentUserId, friendIdNum]
-    // );
-
-    // // Lấy thông tin người gửi
-    // const [senderRows] = await connection.execute(
-    //   "SELECT id, fullName, imageAva FROM users WHERE id = ?",
-    //   [currentUserId]
-    // );
-    // const sender = senderRows[0];
-
-    // // Dữ liệu lời mời kết bạn
-    // const friendRequestData = {
-    //   id: result.insertId.toString(),
-    //   sender: {
-    //     id: sender.id.toString(),
-    //     fullName: sender.fullName,
-    //     image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
-    //   },
-    //   createdAt: new Date().toISOString()
-    // };
-
-    // // Phát sự kiện tới người nhận
-    // req.io
-    //   .to(friendIdNum.toString())
-    //   .emit("newFriendRequest", friendRequestData);
-
-    // // Phát sự kiện tới người gửi (nếu cần hiển thị trong FriendRequest của người gửi)
-    // req.io.to(currentUserId.toString()).emit("friendRequestSent", {
-    //   receiverId: friendIdNum.toString(),
-    //   ...friendRequestData
-    // });
-
-    // console.log("Step 9 - Friend request sent successfully");
-    // res.status(200).json({ message: "Friend request sent successfully." });
     console.log("Step 8 - Send friend request");
     const [result] = await connection.execute(
       "INSERT INTO friend_requests (senderId, receiverId, status, createdAt, updatedAt) VALUES (?, ?, 'pending', NOW(), NOW())",
@@ -998,16 +961,20 @@ const sendFriendRequest = async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    // Phát sự kiện tới người nhận
+    // Phát sự kiện tới người nhận trong namespace /api
     req.io
+      .of("/api") // Chỉ định namespace /api
       .to(friendIdNum.toString())
       .emit("newFriendRequest", friendRequestData);
 
-    // Phát sự kiện tới người gửi (nếu cần hiển thị trong FriendRequest của người gửi)
-    req.io.to(currentUserId.toString()).emit("friendRequestSent", {
-      receiverId: friendIdNum.toString(),
-      ...friendRequestData
-    });
+    // Phát sự kiện tới người gửi trong namespace /api
+    req.io
+      .of("/api")
+      .to(currentUserId.toString())
+      .emit("friendRequestSent", {
+        receiverId: friendIdNum.toString(),
+        ...friendRequestData
+      });
 
     console.log("Step 9 - Friend request sent successfully");
     res.status(200).json({ message: "Friend request sent successfully." });
@@ -1047,17 +1014,46 @@ const getPendingFriendRequests = async (req, res) => {
     console.log("Step 3 - Get database connection");
     connection = await db.getConnection();
 
+    console.log("Step 3.1 - Check current database");
+    const [dbCheck] = await connection.execute("SELECT DATABASE() as db");
+    console.log("Step 3.2 - Current database:", dbCheck[0].db);
+
     console.log("Step 4 - Fetch pending friend requests");
-    const [requestRows] = await connection.execute(
-      `SELECT fr.id, fr.senderId, fr.createdAt, 
-              u.id AS userId, u.fullName, u.imageAva 
-       FROM friend_requests fr 
-       JOIN users u ON fr.senderId = u.id 
-       WHERE fr.receiverId = ? AND fr.status = 'pending' 
-       ORDER BY fr.createdAt DESC`,
-      [currentUserId]
-    );
+    const query = `
+      SELECT fr.id, fr.senderId, fr.receiverId, fr.createdAt,
+             u.id AS userId, u.fullName, u.imageAva
+      FROM friend_requests fr
+      JOIN users u ON fr.senderId = u.id
+      WHERE fr.receiverId = ? AND fr.status = 'pending' AND fr.senderId != ?
+      ORDER BY fr.createdAt DESC
+    `;
+    console.log("Step 4.1 - Query:", query);
+    console.log("Step 4.2 - Query params:", [currentUserId, currentUserId]);
+    const [requestRows] = await connection.execute(query, [
+      currentUserId,
+      currentUserId
+    ]);
     console.log("Step 5 - Pending requests:", requestRows);
+
+    if (requestRows.length === 0) {
+      console.log(
+        "Step 5.3 - No pending friend requests found for receiverId:",
+        currentUserId
+      );
+    } else {
+      console.log("Step 5.1 - Verify receiverId and senderId in results");
+      const invalidRequests = requestRows.filter(
+        (request) =>
+          request.receiverId !== currentUserId ||
+          request.senderId === currentUserId
+      );
+      if (invalidRequests.length > 0) {
+        console.error("Step 5.2 - Found invalid requests:", invalidRequests);
+        throw new Error(
+          "Truy vấn trả về dữ liệu không hợp lệ: receiverId không khớp hoặc senderId trùng với currentUserId"
+        );
+      }
+    }
 
     const formattedRequests = requestRows.map((request) => ({
       id: request.id.toString(),
@@ -1088,6 +1084,294 @@ const getPendingFriendRequests = async (req, res) => {
   }
 };
 
+const acceptFriendRequest = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("Missing or invalid Authorization header");
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+  try {
+    console.log("Step 1 - Verify token");
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const currentUserId = decoded.userId;
+    console.log("Step 2 - Current user ID:", currentUserId);
+
+    const { friendId } = req.body;
+    console.log("Step 3 - Friend ID:", friendId);
+
+    if (!friendId) {
+      console.log("friendId is required");
+      return res.status(400).json({ message: "friendId là bắt buộc" });
+    }
+
+    const friendIdNum = parseInt(friendId, 10);
+    if (isNaN(friendIdNum)) {
+      console.log("Invalid friendId");
+      return res.status(400).json({ message: "friendId không hợp lệ" });
+    }
+
+    if (friendIdNum === currentUserId) {
+      console.log("Cannot accept friend request from yourself");
+      return res
+        .status(400)
+        .json({ message: "Không thể chấp nhận yêu cầu kết bạn từ chính mình" });
+    }
+
+    console.log("Step 4 - Get database connection");
+    connection = await db.getConnection();
+
+    console.log("Step 5 - Check if friendId exists");
+    const [friendRows] = await connection.execute(
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+      [friendIdNum]
+    );
+    if (friendRows.length === 0) {
+      console.log("Friend not found");
+      return res.status(400).json({ message: "Người dùng không tồn tại" });
+    }
+
+    console.log("Step 6 - Check if already friends");
+    const [friendshipRows] = await connection.execute(
+      "SELECT * FROM friends WHERE (userId = ? AND friendId = ?) OR (userId = ? AND friendId = ?)",
+      [currentUserId, friendIdNum, friendIdNum, currentUserId]
+    );
+    if (friendshipRows.length > 0) {
+      console.log("Already friends");
+      return res.status(400).json({ message: "Hai người đã là bạn bè" });
+    }
+
+    console.log("Step 7 - Check if friend request exists");
+    const [requestRows] = await connection.execute(
+      "SELECT * FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
+      [friendIdNum, currentUserId]
+    );
+    if (requestRows.length === 0) {
+      console.log("Friend request not found or not pending");
+      return res.status(400).json({
+        message: "Yêu cầu kết bạn không tồn tại hoặc không ở trạng thái chờ"
+      });
+    }
+
+    const friendRequest = requestRows[0];
+    console.log("Step 8 - Friend request found:", friendRequest);
+
+    console.log("Step 9 - Begin transaction to accept friend request");
+    await connection.beginTransaction();
+
+    console.log("Step 10 - Add friendship to friends table");
+    await connection.execute(
+      "INSERT INTO friends (userId, friendId, createdAt) VALUES (?, ?, NOW()), (?, ?, NOW())",
+      [currentUserId, friendIdNum, friendIdNum, currentUserId]
+    );
+
+    console.log("Step 11 - Delete friend request from friend_requests table");
+    await connection.execute("DELETE FROM friend_requests WHERE id = ?", [
+      friendRequest.id
+    ]);
+
+    await connection.commit();
+    console.log("Step 12 - Transaction committed successfully");
+
+    // Lấy thông tin người nhận (current user)
+    const [receiverRows] = await connection.execute(
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+      [currentUserId]
+    );
+    const receiver = receiverRows[0];
+
+    // Dữ liệu thông báo chấp nhận kết bạn
+    const friendData = {
+      id: friendIdNum.toString(),
+      fullName: friendRows[0].fullName,
+      image: friendRows[0].imageAva
+        ? `/uploads/${friendRows[0].imageAva}`
+        : null
+    };
+    const receiverData = {
+      id: receiver.id.toString(),
+      fullName: receiver.fullName,
+      image: receiver.imageAva ? `/uploads/${receiver.imageAva}` : null
+    };
+
+    // Phát sự kiện tới người gửi (friendIdNum)
+    console.log(
+      "Step 13 - Emitting friendRequestAccepted to sender:",
+      friendIdNum,
+      { friend: receiverData }
+    );
+    req.io
+      .of("/api")
+      .to(friendIdNum.toString())
+      .emit("friendRequestAccepted", { friend: receiverData });
+
+    // Phát sự kiện tới người nhận (currentUserId)
+    console.log(
+      "Step 14 - Emitting friendRequestAccepted to receiver:",
+      currentUserId,
+      { friend: friendData }
+    );
+    req.io
+      .of("/api")
+      .to(currentUserId.toString())
+      .emit("friendRequestAccepted", { friend: friendData });
+
+    console.log("Step 15 - Friend request accepted successfully");
+    res.status(200).json({ message: "Friend request accepted successfully." });
+  } catch (error) {
+    if (connection) {
+      await connection.rollback();
+      console.log("Step 16 - Transaction rolled back due to error");
+    }
+    console.error("Lỗi chấp nhận yêu cầu kết bạn:", {
+      error: error.message,
+      stack: error.stack
+    });
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+const cancelFriendRequest = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("Missing or invalid Authorization header");
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+  try {
+    console.log("Step 1 - Verify token");
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const currentUserId = decoded.userId;
+    console.log("Step 2 - Current user ID:", currentUserId);
+
+    const { friendId } = req.body;
+    console.log("Step 3 - Friend ID:", friendId);
+
+    if (!friendId) {
+      console.log("friendId is required");
+      return res.status(400).json({ message: "friendId là bắt buộc" });
+    }
+
+    const friendIdNum = parseInt(friendId, 10);
+    if (isNaN(friendIdNum)) {
+      console.log("Invalid friendId");
+      return res.status(400).json({ message: "friendId không hợp lệ" });
+    }
+
+    if (friendIdNum === currentUserId) {
+      console.log("Cannot cancel friend request to yourself");
+      return res
+        .status(400)
+        .json({ message: "Không thể hủy yêu cầu kết bạn với chính mình" });
+    }
+
+    console.log("Step 4 - Get database connection");
+    connection = await db.getConnection();
+
+    console.log("Step 5 - Check if friendId exists");
+    const [friendRows] = await connection.execute(
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+      [friendIdNum]
+    );
+    if (friendRows.length === 0) {
+      console.log("Friend not found");
+      return res.status(400).json({ message: "Người dùng không tồn tại" });
+    }
+
+    console.log("Step 6 - Check if friend request exists");
+    const [requestRows] = await connection.execute(
+      "SELECT * FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
+      [currentUserId, friendIdNum]
+    );
+    if (requestRows.length === 0) {
+      console.log("Friend request not found or not pending");
+      return res.status(400).json({
+        message: "Yêu cầu kết bạn không tồn tại hoặc không ở trạng thái chờ"
+      });
+    }
+
+    const friendRequest = requestRows[0];
+    console.log("Step 7 - Friend request found:", friendRequest);
+
+    console.log("Step 8 - Delete friend request from friend_requests table");
+    await connection.execute("DELETE FROM friend_requests WHERE id = ?", [
+      friendRequest.id
+    ]);
+
+    // Lấy thông tin người gửi (current user)
+    const [senderRows] = await connection.execute(
+      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
+      [currentUserId]
+    );
+    const sender = senderRows[0];
+
+    // Dữ liệu thông báo hủy yêu cầu kết bạn
+    const friendData = {
+      id: friendIdNum.toString(),
+      fullName: friendRows[0].fullName,
+      image: friendRows[0].imageAva
+        ? `/uploads/${friendRows[0].imageAva}`
+        : null
+    };
+    const senderData = {
+      id: sender.id.toString(),
+      fullName: sender.fullName,
+      image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
+    };
+
+    // Phát sự kiện tới người nhận (friendIdNum)
+    console.log(
+      "Step 9 - Emitting friendRequestCanceled to receiver:",
+      friendIdNum,
+      { sender: senderData }
+    );
+    req.io
+      .of("/api")
+      .to(friendIdNum.toString())
+      .emit("friendRequestCanceled", { sender: senderData });
+
+    // Phát sự kiện tới người gửi (currentUserId)
+    console.log(
+      "Step 10 - Emitting friendRequestCanceled to sender:",
+      currentUserId,
+      { receiver: friendData }
+    );
+    req.io
+      .of("/api")
+      .to(currentUserId.toString())
+      .emit("friendRequestCanceled", { receiver: friendData });
+
+    console.log("Step 11 - Friend request canceled successfully");
+    res.status(200).json({ message: "Friend request canceled successfully." });
+  } catch (error) {
+    console.error("Lỗi hủy yêu cầu kết bạn:", {
+      error: error.message,
+      stack: error.stack
+    });
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   signup,
   login,
@@ -1101,5 +1385,7 @@ module.exports = {
   getPendingFriendRequests,
   forgotPassword,
   resetPassword,
-  changePassword
+  changePassword,
+  acceptFriendRequest,
+  cancelFriendRequest
 };
