@@ -107,17 +107,14 @@ const login = async (req, res) => {
 const forgotPassword = async (req, res) => {
   const { email } = req.body;
 
-  // Kiểm tra xem email có được cung cấp hay không
   if (!email) {
     return res.status(400).json({ message: "Email là bắt buộc" });
   }
 
   let connection;
   try {
-    // Kết nối với cơ sở dữ liệu
     connection = await db.getConnection();
 
-    // Kiểm tra xem người dùng có tồn tại không
     const [rows] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
@@ -128,20 +125,16 @@ const forgotPassword = async (req, res) => {
 
     const user = rows[0];
 
-    // Xóa các OTP hoặc token đặt lại mật khẩu cũ (nếu có)
     await connection.execute("DELETE FROM otps WHERE email = ?", [email]);
 
-    // Tạo OTP hoặc token đặt lại mật khẩu
-    const resetToken = generateOTP(); // Sử dụng hàm generateOTP đã có
-    const tokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // Hết hạn sau 10 phút
+    const resetToken = generateOTP();
+    const tokenExpiry = new Date(Date.now() + 10 * 60 * 1000);
 
-    // Lưu token vào cơ sở dữ liệu
     await connection.execute(
       "INSERT INTO otps (userId, email, otp, expiry) VALUES (?, ?, ?, ?)",
       [user.id, email, resetToken, tokenExpiry]
     );
 
-    // Gửi email đặt lại mật khẩu
     const mailOptions = {
       from: process.env.EMAIL_USER || "your_email@gmail.com",
       to: email,
@@ -151,7 +144,6 @@ const forgotPassword = async (req, res) => {
 
     await transporter.sendMail(mailOptions);
 
-    // Trả về phản hồi thành công
     res
       .status(200)
       .json({ message: "Password reset email sent successfully." });
@@ -167,7 +159,6 @@ const forgotPassword = async (req, res) => {
 const resetPassword = async (req, res) => {
   const { email, password } = req.body;
 
-  // Kiểm tra các trường bắt buộc
   if (!email || !password) {
     return res.status(400).json({ message: "Email và mật khẩu là bắt buộc" });
   }
@@ -176,7 +167,6 @@ const resetPassword = async (req, res) => {
   try {
     connection = await db.getConnection();
 
-    // Kiểm tra xem email có OTP hợp lệ không
     const [otpRows] = await connection.execute(
       "SELECT * FROM otps WHERE email = ? AND expiry > NOW()",
       [email]
@@ -187,7 +177,6 @@ const resetPassword = async (req, res) => {
         .json({ message: "Bạn cần xác thực OTP trước khi reset mật khẩu" });
     }
 
-    // Kiểm tra xem người dùng có tồn tại không
     const [rows] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
@@ -196,24 +185,19 @@ const resetPassword = async (req, res) => {
       return res.status(404).json({ message: "Người dùng không tồn tại" });
     }
 
-    // Băm mật khẩu mới
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Cập nhật mật khẩu mới vào bảng users
     const [updateResult] = await connection.execute(
       "UPDATE users SET password = ? WHERE email = ?",
       [hashedPassword, email]
     );
 
-    // Kiểm tra xem truy vấn có cập nhật thành công không
     if (updateResult.affectedRows === 0) {
       return res.status(500).json({ message: "Không thể cập nhật mật khẩu" });
     }
 
-    // Xóa OTP sau khi reset mật khẩu thành công
     await connection.execute("DELETE FROM otps WHERE email = ?", [email]);
 
-    // Trả về phản hồi thành công
     res.status(200).json({ message: "Password reset successfully." });
   } catch (error) {
     console.error("Lỗi reset mật khẩu:", error);
@@ -227,12 +211,10 @@ const resetPassword = async (req, res) => {
 const verifyOTP = async (req, res) => {
   const { email, otp, flow } = req.body;
 
-  // Kiểm tra các trường bắt buộc
   if (!email || !otp || !flow) {
     return res.status(400).json({ message: "Thiếu email, OTP hoặc flow" });
   }
 
-  // Kiểm tra giá trị của flow
   if (!["login", "forgot-password"].includes(flow)) {
     return res.status(400).json({ message: "Giá trị flow không hợp lệ" });
   }
@@ -241,7 +223,6 @@ const verifyOTP = async (req, res) => {
   try {
     connection = await db.getConnection();
 
-    // Kiểm tra OTP
     const [rows] = await connection.execute(
       "SELECT * FROM otps WHERE email = ? AND otp = ? AND expiry > NOW()",
       [email, otp]
@@ -250,9 +231,6 @@ const verifyOTP = async (req, res) => {
       return res.status(401).json({ message: "OTP hoặc email không hợp lệ" });
     }
 
-    // Không xóa OTP ở đây, để resetPassword xử lý nếu flow là forgot-password
-
-    // Kiểm tra người dùng
     const [userRows] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
@@ -263,7 +241,6 @@ const verifyOTP = async (req, res) => {
     const user = userRows[0];
 
     if (flow === "login") {
-      // Flow login: Tạo accessToken và refreshToken
       const accessToken = jwt.sign(
         { userId: user.id, email: user.email },
         process.env.ACCESS_TOKEN_SECRET,
@@ -275,14 +252,12 @@ const verifyOTP = async (req, res) => {
         { expiresIn: "7d" }
       );
 
-      // Lưu refreshToken vào database
-      const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 ngày
+      const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       await connection.execute(
         "INSERT INTO refresh_tokens (userId, token, expiry) VALUES (?, ?, ?)",
         [user.id, refreshToken, tokenExpiry]
       );
 
-      // Xóa OTP sau khi đăng nhập thành công (flow login)
       await connection.execute("DELETE FROM otps WHERE email = ? AND otp = ?", [
         email,
         otp
@@ -295,7 +270,6 @@ const verifyOTP = async (req, res) => {
         user: { id: user.id, fullName: user.fullName, email: user.email }
       });
     } else if (flow === "forgot-password") {
-      // Flow forgot password: Chỉ trả về thông báo thành công
       return res.status(200).json({
         message: "Xác minh OTP thành công"
       });
@@ -313,7 +287,6 @@ const changePassword = async (req, res) => {
   const { oldPassword, newPassword } = req.body;
   const authHeader = req.headers.authorization;
 
-  // Kiểm tra header Authorization
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Không được phép truy cập" });
   }
@@ -321,11 +294,9 @@ const changePassword = async (req, res) => {
   const token = authHeader.split(" ")[1];
   let connection;
   try {
-    // Xác thực token
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
     const userId = decoded.userId;
 
-    // Kiểm tra các trường bắt buộc
     if (!oldPassword || !newPassword) {
       return res
         .status(400)
@@ -334,7 +305,6 @@ const changePassword = async (req, res) => {
 
     connection = await db.getConnection();
 
-    // Lấy thông tin người dùng
     const [rows] = await connection.execute(
       "SELECT * FROM users WHERE id = ?",
       [userId]
@@ -345,16 +315,13 @@ const changePassword = async (req, res) => {
 
     const user = rows[0];
 
-    // Kiểm tra mật khẩu cũ
     const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({ message: "Mật khẩu cũ không đúng" });
     }
 
-    // Băm mật khẩu mới
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
 
-    // Cập nhật mật khẩu mới
     const [updateResult] = await connection.execute(
       "UPDATE users SET password = ? WHERE id = ?",
       [hashedNewPassword, userId]
@@ -364,7 +331,6 @@ const changePassword = async (req, res) => {
       return res.status(500).json({ message: "Không thể cập nhật mật khẩu" });
     }
 
-    // (Tùy chọn) Xóa refresh token để yêu cầu đăng nhập lại
     await connection.execute("DELETE FROM refresh_tokens WHERE userId = ?", [
       userId
     ]);
@@ -620,6 +586,11 @@ const getPosts = async (req, res) => {
     const [posts] = await connection.execute(query);
     console.log("Bước 6 - Lấy danh sách bài đăng:", posts);
 
+    if (posts.length === 0) {
+      console.log("Không tìm thấy bài đăng nào.");
+      return res.status(200).json([]);
+    }
+
     const formattedPosts = await Promise.all(
       posts.map(async (post) => {
         let likes = [];
@@ -657,7 +628,7 @@ const getPosts = async (req, res) => {
           author: {
             id: post.userId.toString(),
             fullName: post.fullName || "Người dùng không xác định",
-            email: post.email,
+            email: post.email || "",
             role: "regular",
             image: post.imageAva ? `/uploads/${post.imageAva}` : null
           },
@@ -705,7 +676,7 @@ const searchUsers = async (req, res) => {
   try {
     console.log("Step 1 - Verify token");
     const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
-    const currentUserId = decoded.userId; // Không ép kiểu thành chuỗi
+    const currentUserId = decoded.userId;
     console.log("Step 2 - Current user ID:", currentUserId);
 
     const { searchQuery } = req.params;
@@ -751,7 +722,7 @@ const searchUsers = async (req, res) => {
     ]);
     console.log("Step 8 - Found users:", users);
 
-    const userIds = users.map((user) => parseInt(user.id, 10)); // Đảm bảo userIds là số
+    const userIds = users.map((user) => parseInt(user.id, 10));
     console.log("Step 9 - User IDs:", userIds);
 
     let friends = [];
@@ -943,39 +914,6 @@ const sendFriendRequest = async (req, res) => {
       [currentUserId, friendIdNum]
     );
 
-    // Lấy thông tin người gửi
-    const [senderRows] = await connection.execute(
-      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
-      [currentUserId]
-    );
-    const sender = senderRows[0];
-
-    // Dữ liệu lời mời kết bạn
-    const friendRequestData = {
-      id: result.insertId.toString(),
-      sender: {
-        id: sender.id.toString(),
-        fullName: sender.fullName,
-        image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
-      },
-      createdAt: new Date().toISOString()
-    };
-
-    // Phát sự kiện tới người nhận trong namespace /api
-    req.io
-      .of("/api") // Chỉ định namespace /api
-      .to(friendIdNum.toString())
-      .emit("newFriendRequest", friendRequestData);
-
-    // Phát sự kiện tới người gửi trong namespace /api
-    req.io
-      .of("/api")
-      .to(currentUserId.toString())
-      .emit("friendRequestSent", {
-        receiverId: friendIdNum.toString(),
-        ...friendRequestData
-      });
-
     console.log("Step 9 - Friend request sent successfully");
     res.status(200).json({ message: "Friend request sent successfully." });
   } catch (error) {
@@ -1084,6 +1022,7 @@ const getPendingFriendRequests = async (req, res) => {
   }
 };
 
+// Chấp nhận yêu cầu kết bạn
 const acceptFriendRequest = async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -1175,55 +1114,12 @@ const acceptFriendRequest = async (req, res) => {
     await connection.commit();
     console.log("Step 12 - Transaction committed successfully");
 
-    // Lấy thông tin người nhận (current user)
-    const [receiverRows] = await connection.execute(
-      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
-      [currentUserId]
-    );
-    const receiver = receiverRows[0];
-
-    // Dữ liệu thông báo chấp nhận kết bạn
-    const friendData = {
-      id: friendIdNum.toString(),
-      fullName: friendRows[0].fullName,
-      image: friendRows[0].imageAva
-        ? `/uploads/${friendRows[0].imageAva}`
-        : null
-    };
-    const receiverData = {
-      id: receiver.id.toString(),
-      fullName: receiver.fullName,
-      image: receiver.imageAva ? `/uploads/${receiver.imageAva}` : null
-    };
-
-    // Phát sự kiện tới người gửi (friendIdNum)
-    console.log(
-      "Step 13 - Emitting friendRequestAccepted to sender:",
-      friendIdNum,
-      { friend: receiverData }
-    );
-    req.io
-      .of("/api")
-      .to(friendIdNum.toString())
-      .emit("friendRequestAccepted", { friend: receiverData });
-
-    // Phát sự kiện tới người nhận (currentUserId)
-    console.log(
-      "Step 14 - Emitting friendRequestAccepted to receiver:",
-      currentUserId,
-      { friend: friendData }
-    );
-    req.io
-      .of("/api")
-      .to(currentUserId.toString())
-      .emit("friendRequestAccepted", { friend: friendData });
-
-    console.log("Step 15 - Friend request accepted successfully");
+    console.log("Step 13 - Friend request accepted successfully");
     res.status(200).json({ message: "Friend request accepted successfully." });
   } catch (error) {
     if (connection) {
       await connection.rollback();
-      console.log("Step 16 - Transaction rolled back due to error");
+      console.log("Step 14 - Transaction rolled back due to error");
     }
     console.error("Lỗi chấp nhận yêu cầu kết bạn:", {
       error: error.message,
@@ -1241,6 +1137,7 @@ const acceptFriendRequest = async (req, res) => {
   }
 };
 
+// Hủy yêu cầu kết bạn
 const cancelFriendRequest = async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -1310,50 +1207,7 @@ const cancelFriendRequest = async (req, res) => {
       friendRequest.id
     ]);
 
-    // Lấy thông tin người gửi (current user)
-    const [senderRows] = await connection.execute(
-      "SELECT id, fullName, imageAva FROM users WHERE id = ?",
-      [currentUserId]
-    );
-    const sender = senderRows[0];
-
-    // Dữ liệu thông báo hủy yêu cầu kết bạn
-    const friendData = {
-      id: friendIdNum.toString(),
-      fullName: friendRows[0].fullName,
-      image: friendRows[0].imageAva
-        ? `/uploads/${friendRows[0].imageAva}`
-        : null
-    };
-    const senderData = {
-      id: sender.id.toString(),
-      fullName: sender.fullName,
-      image: sender.imageAva ? `/uploads/${sender.imageAva}` : null
-    };
-
-    // Phát sự kiện tới người nhận (friendIdNum)
-    console.log(
-      "Step 9 - Emitting friendRequestCanceled to receiver:",
-      friendIdNum,
-      { sender: senderData }
-    );
-    req.io
-      .of("/api")
-      .to(friendIdNum.toString())
-      .emit("friendRequestCanceled", { sender: senderData });
-
-    // Phát sự kiện tới người gửi (currentUserId)
-    console.log(
-      "Step 10 - Emitting friendRequestCanceled to sender:",
-      currentUserId,
-      { receiver: friendData }
-    );
-    req.io
-      .of("/api")
-      .to(currentUserId.toString())
-      .emit("friendRequestCanceled", { receiver: friendData });
-
-    console.log("Step 11 - Friend request canceled successfully");
+    console.log("Step 9 - Friend request canceled successfully");
     res.status(200).json({ message: "Friend request canceled successfully." });
   } catch (error) {
     console.error("Lỗi hủy yêu cầu kết bạn:", {

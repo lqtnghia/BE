@@ -4,7 +4,7 @@ const pool = mysql.createPool({
   host: "localhost",
   user: "root",
   password: "root", // Thay bằng mật khẩu MySQL của bạn
-  database: "social_network",
+  database: "social_media",
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0

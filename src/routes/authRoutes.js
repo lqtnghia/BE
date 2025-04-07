@@ -29,6 +29,7 @@ router.get("/friends/pending", authController.getPendingFriendRequests);
 router.post("/forgot-password", authController.forgotPassword);
 router.post("/reset-password", authController.resetPassword);
 router.post("/change-password", authController.changePassword);
+router.post("/friends/accept", authController.acceptFriendRequest);
+router.post("/friends/cancel", authController.cancelFriendRequest);
 
 module.exports = router;
-
