@@ -2478,7 +2478,7 @@ const cancelFriendRequest = async (req, res) => {
     // console.log("Step 6 - Check if friend request exists");
     const [requestRows] = await connection.execute(
       "SELECT * FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
-      [currentUserId, friendIdNum]
+      [friendIdNum, currentUserId]
     );
     if (requestRows.length === 0) {
       // console.log("Friend request not found or not pending");
@@ -2487,13 +2487,25 @@ const cancelFriendRequest = async (req, res) => {
       });
     }
 
-    const friendRequest = requestRows[0];
-    // console.log("Step 7 - Friend request found:", friendRequest);
+    console.log("Step 7 - Friend requests found:", requestRows);
 
-    // console.log("Step 8 - Delete friend request from friend_requests table");
-    await connection.execute("DELETE FROM friend_requests WHERE id = ?", [
-      friendRequest.id
-    ]);
+    console.log(
+      "Step 8 - Delete all matching friend requests from friend_requests table"
+    );
+    const [deleteResult] = await connection.execute(
+      "DELETE FROM friend_requests WHERE senderId = ? AND receiverId = ? AND status = 'pending'",
+      [friendIdNum, currentUserId]
+    );
+    console.log("Step 8.1 - Delete result:", deleteResult);
+    if (deleteResult.affectedRows === 0) {
+      console.log(
+        "No rows deleted, friend request may have already been removed"
+      );
+      return res.status(400).json({
+        message:
+          "Không thể xóa yêu cầu kết bạn, có thể yêu cầu đã bị xóa trước đó"
+      });
+    }
 
     // console.log("Step 9 - Friend request canceled successfully");
     res.status(200).json({ message: "Friend request canceled successfully." });
