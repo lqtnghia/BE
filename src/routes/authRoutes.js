@@ -23,6 +23,7 @@ router.post("/refresh-token", authController.refreshToken);
 router.get("/auth-user", authController.getAuthUser);
 router.post("/posts", authController.createPost(upload));
 router.get("/posts", authController.getPosts);
+router.get("/posts/:id", authController.getPostById);
 router.get("/search/users/:searchQuery", authController.searchUsers);
 router.post("/friends/request", authController.sendFriendRequest);
 router.get("/friends/pending", authController.getPendingFriendRequests);
@@ -31,5 +32,12 @@ router.post("/reset-password", authController.resetPassword);
 router.post("/change-password", authController.changePassword);
 router.post("/friends/accept", authController.acceptFriendRequest);
 router.post("/friends/cancel", authController.cancelFriendRequest);
+router.post("/posts/:postId/like", authController.likePost);
+router.delete("/posts/:postId/like", authController.unlikePost);
+router.post("/posts/:postId/comment", authController.addComment);
+router.delete(
+  "/posts/:postId/comment/:commentId",
+  authController.deleteComment
+);
 
 module.exports = router;

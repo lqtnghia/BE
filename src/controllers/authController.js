@@ -1818,110 +1818,133 @@ const createPost = (upload) => async (req, res) => {
 const getPosts = async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    // console.log("Missing or invalid Authorization header");
     return res.status(401).json({ message: "Không được phép truy cập" });
   }
 
   const token = authHeader.split(" ")[1];
   let connection;
-  try {
-    // console.log("Bước 1 - Nhận token:", token);
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
-    // console.log("Bước 2 - Giải mã token:", decoded);
 
-    const limit = parseInt(req.query.limit, 10) || 10;
-    const offset = parseInt(req.query.offset, 10) || 0;
-    if (isNaN(limit) || isNaN(offset) || limit < 0 || offset < 0) {
-      return res
-        .status(400)
-        .json({ message: "Limit và offset phải là số nguyên không âm" });
-    }
-    // console.log("Bước 3 - Tham số truy vấn:", { limit, offset });
+  try {
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
 
     connection = await db.getConnection();
-    // console.log("Bước 4 - Kết nối cơ sở dữ liệu thành công");
+    await connection.beginTransaction();
 
-    const query =
-      "SELECT posts.id, posts.content, posts.image, posts.createdAt, users.id AS userId, users.fullName, users.email, users.imageAva " +
-      "FROM posts " +
-      "LEFT JOIN users ON posts.userId = users.id " +
-      "ORDER BY posts.createdAt DESC " +
-      `LIMIT ${limit} OFFSET ${offset}`;
-    // console.log("Bước 5 - Thực thi truy vấn:", query);
-    const [posts] = await connection.execute(query);
-    // console.log("Bước 6 - Lấy danh sách bài đăng:", posts);
+    // Lấy danh sách bài đăng
+    const [posts] = await connection.execute(
+      "SELECT p.*, u.fullName, u.imageAva " +
+        "FROM posts p JOIN users u ON p.userId = u.id " +
+        "ORDER BY p.createdAt DESC"
+    );
 
-    if (posts.length === 0) {
-      // console.log("Không tìm thấy bài đăng nào.");
-      return res.status(200).json([]);
-    }
-
+    // Lấy danh sách lượt thích và bình luận cho từng bài đăng
     const formattedPosts = await Promise.all(
       posts.map(async (post) => {
-        let likes = [];
-        let comments = [];
-        try {
-          [likes] = await connection.execute(
-            "SELECT userId, createdAt FROM likes WHERE postId = ?",
-            [post.id]
-          );
-          // console.log("Bước 7 - Lượt thích cho bài đăng", post.id, ":", likes);
-          [comments] = await connection.execute(
-            "SELECT userId, content, createdAt FROM comments WHERE postId = ?",
-            [post.id]
-          );
-          // console.log(
-          //   "Bước 8 - Bình luận cho bài đăng",
-          //   post.id,
-          //   ":",
-          //   comments
-          // );
-        } catch (subError) {
-          // console.error(
-          //   "Lỗi khi lấy lượt thích/bình luận cho bài đăng",
-          //   post.id,
-          //   ":",
-          //   subError
-          // );
-          likes = [];
-          comments = [];
-        }
+        const [likes] = await connection.execute(
+          "SELECT userId FROM likes WHERE postId = ?",
+          [post.id]
+        );
+
+        const [comments] = await connection.execute(
+          "SELECT c.*, u.fullName, u.imageAva " +
+            "FROM comments c LEFT JOIN users u ON c.userId = u.id " + // Sử dụng LEFT JOIN
+            "WHERE c.postId = ? ORDER BY c.createdAt DESC",
+          [post.id]
+        );
+
         return {
-          id: post.id.toString(),
-          content: post.content || "",
+          ...post,
           image: post.image ? `/uploads/${post.image}` : null,
-          author: {
-            id: post.userId.toString(),
-            fullName: post.fullName || "Người dùng không xác định",
-            email: post.email || "",
-            role: "regular",
-            image: post.imageAva ? `/uploads/${post.imageAva}` : null
-          },
-          likes: likes.map((like) => ({
-            userId: like.userId.toString(),
-            createdAt: new Date(like.createdAt).toISOString()
-          })),
+          imageAva: post.imageAva ? `/uploads/${post.imageAva}` : null,
+          likes: likes.map((like) => ({ userId: like.userId })),
           comments: comments.map((comment) => ({
-            userId: comment.userId.toString(),
+            id: comment.id,
             content: comment.content,
-            createdAt: new Date(comment.createdAt).toISOString()
-          })),
-          createdAt: new Date(post.createdAt).toISOString(),
-          updatedAt: new Date(post.createdAt).toISOString()
+            createdAt: comment.createdAt,
+            user: {
+              id: comment.userId,
+              fullName: comment.fullName || "Unknown User", // Giá trị mặc định
+              imageAva: comment.imageAva ? `/uploads/${comment.imageAva}` : null
+            }
+          }))
         };
       })
     );
 
-    // console.log("Bước 9 - Định dạng bài đăng:", formattedPosts);
+    await connection.commit();
     res.status(200).json(formattedPosts);
   } catch (error) {
-    // console.error("Lỗi lấy danh sách bài đăng:", error);
+    if (connection) await connection.rollback();
     if (
       error.name === "TokenExpiredError" ||
       error.name === "JsonWebTokenError"
     ) {
       return res.status(401).json({ message: "Không được phép truy cập" });
     }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Lấy bài đăng theo ID
+const getPostById = async (req, res) => {
+  const { postId } = req.params;
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Lấy thông tin bài đăng
+    const [post] = await connection.execute(
+      "SELECT p.*, u.fullName, u.imageAva " +
+        "FROM posts p JOIN users u ON p.userId = u.id " +
+        "WHERE p.id = ?",
+      [postId]
+    );
+
+    if (post.length === 0) {
+      return res.status(404).json({ message: "Bài đăng không tồn tại" });
+    }
+
+    // Lấy danh sách người dùng đã thích bài đăng
+    const [likes] = await connection.execute(
+      "SELECT userId FROM likes WHERE postId = ?",
+      [postId]
+    );
+
+    // Lấy danh sách bình luận và thông tin người dùng
+    const [comments] = await connection.execute(
+      "SELECT c.*, u.fullName, u.imageAva " +
+        "FROM comments c LEFT JOIN users u ON c.userId = u.id " + // Sử dụng LEFT JOIN
+        "WHERE c.postId = ? ORDER BY c.createdAt DESC",
+      [postId]
+    );
+
+    // Chuẩn hóa dữ liệu bài đăng
+    const formattedPost = {
+      ...post[0],
+      image: post[0].image ? `/uploads/${post[0].image}` : null,
+      imageAva: post[0].imageAva ? `/uploads/${post[0].imageAva}` : null,
+      likes: likes.map((like) => ({ userId: like.userId })),
+      comments: comments.map((comment) => ({
+        id: comment.id,
+        content: comment.content,
+        createdAt: comment.createdAt,
+        user: {
+          id: comment.userId,
+          fullName: comment.fullName || "Unknown User", // Giá trị mặc định
+          imageAva: comment.imageAva ? `/uploads/${comment.imageAva}` : null
+        }
+      }))
+    };
+
+    await connection.commit();
+    res.status(200).json(formattedPost);
+  } catch (error) {
+    if (connection) await connection.rollback();
     res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
   } finally {
     if (connection) connection.release();
@@ -2526,6 +2549,250 @@ const cancelFriendRequest = async (req, res) => {
   }
 };
 
+// Like một bài đăng
+const likePost = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const { postId } = req.params; // Lấy postId từ params
+  let connection;
+
+  try {
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Kiểm tra xem bài đăng có tồn tại không
+    const [posts] = await connection.execute(
+      "SELECT * FROM posts WHERE id = ?",
+      [postId]
+    );
+    if (posts.length === 0) {
+      return res.status(404).json({ message: "Bài đăng không tồn tại" });
+    }
+
+    // Kiểm tra xem người dùng đã like bài đăng này chưa
+    const [existingLike] = await connection.execute(
+      "SELECT * FROM likes WHERE userId = ? AND postId = ?",
+      [userId, postId]
+    );
+    if (existingLike.length > 0) {
+      return res.status(400).json({ message: "Bạn đã thích bài đăng này rồi" });
+    }
+
+    // Thêm lượt thích vào bảng likes
+    await connection.execute(
+      "INSERT INTO likes (userId, postId, createdAt) VALUES (?, ?, NOW())",
+      [userId, postId]
+    );
+
+    await connection.commit();
+    res.status(201).json({ message: "Thích bài đăng thành công" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Unlike một bài đăng
+const unlikePost = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const { postId } = req.params; // Lấy postId từ params
+  let connection;
+
+  try {
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Kiểm tra xem bài đăng có tồn tại không
+    const [posts] = await connection.execute(
+      "SELECT * FROM posts WHERE id = ?",
+      [postId]
+    );
+    if (posts.length === 0) {
+      return res.status(404).json({ message: "Bài đăng không tồn tại" });
+    }
+
+    // Kiểm tra xem người dùng đã like bài đăng này chưa
+    const [existingLike] = await connection.execute(
+      "SELECT * FROM likes WHERE userId = ? AND postId = ?",
+      [userId, postId]
+    );
+    if (existingLike.length === 0) {
+      return res.status(400).json({ message: "Bạn chưa thích bài đăng này" });
+    }
+
+    // Xóa lượt thích khỏi bảng likes
+    await connection.execute(
+      "DELETE FROM likes WHERE userId = ? AND postId = ?",
+      [userId, postId]
+    );
+
+    await connection.commit();
+    res.status(200).json({ message: "Bỏ thích bài đăng thành công" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Thêm bình luận
+const addComment = async (req, res) => {
+  const { postId } = req.params;
+  const { comment } = req.body;
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  if (!comment) {
+    return res.status(400).json({ message: "Nội dung bình luận là bắt buộc" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  let connection;
+
+  try {
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Thêm bình luận mới
+    const [result] = await connection.execute(
+      "INSERT INTO comments (userId, postId, content, createdAt) VALUES (?, ?, ?, NOW())",
+      [userId, postId, comment]
+    );
+
+    // Lấy thông tin bình luận vừa thêm, bao gồm thông tin người dùng
+    const [newComment] = await connection.execute(
+      "SELECT c.*, u.fullName, u.imageAva " +
+        "FROM comments c LEFT JOIN users u ON c.userId = u.id " + // Sử dụng LEFT JOIN
+        "WHERE c.id = ?",
+      [result.insertId]
+    );
+
+    if (newComment.length === 0) {
+      throw new Error("Không tìm thấy bình luận vừa thêm");
+    }
+
+    const formattedComment = {
+      id: newComment[0].id,
+      content: newComment[0].content,
+      createdAt: newComment[0].createdAt,
+      user: {
+        id: newComment[0].userId,
+        fullName: newComment[0].fullName || "Unknown User", // Giá trị mặc định
+        imageAva: newComment[0].imageAva
+          ? `/uploads/${newComment[0].imageAva}`
+          : null
+      }
+    };
+
+    await connection.commit();
+    res.status(200).json(formattedComment);
+  } catch (error) {
+    if (connection) await connection.rollback();
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// Xóa bình luận
+const deleteComment = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const { postId, commentId } = req.params; // Lấy postId và commentId từ params
+  let connection;
+
+  try {
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const userId = decoded.userId;
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Kiểm tra xem bài đăng có tồn tại không
+    const [posts] = await connection.execute(
+      "SELECT * FROM posts WHERE id = ?",
+      [postId]
+    );
+    if (posts.length === 0) {
+      return res.status(404).json({ message: "Bài đăng không tồn tại" });
+    }
+
+    // Kiểm tra xem bình luận có tồn tại và thuộc về người dùng không
+    const [comments] = await connection.execute(
+      "SELECT * FROM comments WHERE id = ? AND postId = ? AND userId = ?",
+      [commentId, postId, userId]
+    );
+    if (comments.length === 0) {
+      return res.status(404).json({
+        message: "Bình luận không tồn tại hoặc bạn không có quyền xóa"
+      });
+    }
+
+    // Xóa bình luận
+    await connection.execute("DELETE FROM comments WHERE id = ?", [commentId]);
+
+    await connection.commit();
+    res.status(200).json({ message: "Xóa bình luận thành công" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   signup,
   login,
@@ -2541,5 +2808,10 @@ module.exports = {
   resetPassword,
   changePassword,
   acceptFriendRequest,
-  cancelFriendRequest
+  cancelFriendRequest,
+  getPostById,
+  likePost,
+  unlikePost,
+  addComment,
+  deleteComment
 };
