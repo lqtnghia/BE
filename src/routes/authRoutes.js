@@ -32,6 +32,7 @@ router.post("/reset-password", authController.resetPassword);
 router.post("/change-password", authController.changePassword);
 router.post("/friends/accept", authController.acceptFriendRequest);
 router.post("/friends/cancel", authController.cancelFriendRequest);
+router.get("/friends", authController.getFriends);
 router.post("/posts/:postId/like", authController.likePost);
 router.delete("/posts/:postId/like", authController.unlikePost);
 router.post("/posts/:postId/comment", authController.addComment);
@@ -39,5 +40,6 @@ router.delete(
   "/posts/:postId/comment/:commentId",
   authController.deleteComment
 );
+router.get("/users/:id", authController.getUserById);
 
 module.exports = router;
