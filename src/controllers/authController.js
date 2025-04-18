@@ -568,11 +568,25 @@ const getPosts = async (req, res) => {
     connection = await db.getConnection();
     await connection.beginTransaction();
 
-    // Lấy danh sách bài đăng
+    // Lấy danh sách bài đăng của người dùng hiện tại và bạn bè
     const [posts] = await connection.execute(
-      "SELECT p.*, u.fullName, u.imageAva " +
-        "FROM posts p JOIN users u ON p.userId = u.id " +
-        "ORDER BY p.createdAt DESC"
+      `
+      SELECT p.*, u.fullName, u.imageAva 
+      FROM posts p 
+      JOIN users u ON p.userId = u.id 
+      WHERE p.userId = ? 
+      OR p.userId IN (
+        SELECT friendId 
+        FROM friends 
+        WHERE userId = ? 
+        UNION 
+        SELECT userId 
+        FROM friends 
+        WHERE friendId = ?
+      )
+      ORDER BY p.createdAt DESC
+      `,
+      [userId, userId, userId]
     );
 
     // Lấy danh sách lượt thích và bình luận cho từng bài đăng
@@ -584,9 +598,13 @@ const getPosts = async (req, res) => {
         );
 
         const [comments] = await connection.execute(
-          "SELECT c.*, u.fullName, u.imageAva " +
-            "FROM comments c LEFT JOIN users u ON c.userId = u.id " + // Sử dụng LEFT JOIN
-            "WHERE c.postId = ? ORDER BY c.createdAt DESC",
+          `
+          SELECT c.*, u.fullName, u.imageAva 
+          FROM comments c 
+          LEFT JOIN users u ON c.userId = u.id 
+          WHERE c.postId = ? 
+          ORDER BY c.createdAt DESC
+          `,
           [post.id]
         );
 
@@ -601,7 +619,7 @@ const getPosts = async (req, res) => {
             createdAt: comment.createdAt,
             user: {
               id: comment.userId,
-              fullName: comment.fullName || "Unknown User", // Giá trị mặc định
+              fullName: comment.fullName || "Unknown User",
               imageAva: comment.imageAva ? `/uploads/${comment.imageAva}` : null
             }
           }))
@@ -754,6 +772,128 @@ const getPostById = async (req, res) => {
       connection.release();
       console.log("Đã giải phóng kết nối cơ sở dữ liệu");
     }
+  }
+};
+
+// Lấy danh sách bài đăng của một người dùng cụ thể theo authorId
+const getPostsByAuthor = async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Không được phép truy cập" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  const { authorId } = req.params;
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const limit = parseInt(req.query.limit, 10) || 10;
+
+  let connection;
+
+  try {
+    // Xác thực token
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    const parsedAuthorId = parseInt(authorId, 10);
+    if (isNaN(parsedAuthorId) || parsedAuthorId <= 0) {
+      return res.status(400).json({ message: "ID tác giả không hợp lệ" });
+    }
+
+    // Kiểm tra kiểu dữ liệu
+    if (isNaN(offset) || isNaN(limit) || offset < 0 || limit <= 0) {
+      return res
+        .status(400)
+        .json({ message: "Tham số offset hoặc limit không hợp lệ" });
+    }
+
+    console.log("Parameters for posts query:", {
+      parsedAuthorId,
+      limit,
+      offset
+    });
+
+    connection = await db.getConnection();
+
+    // Lấy tổng số bài đăng
+    const [totalResult] = await connection.execute(
+      "SELECT COUNT(*) as total FROM posts WHERE userId = ?",
+      [parsedAuthorId]
+    );
+    const total = totalResult[0].total;
+
+    // Lấy danh sách bài đăng (truyền LIMIT và OFFSET trực tiếp)
+    const [posts] = await connection.execute(
+      `
+      SELECT p.*, u.fullName, u.imageAva 
+      FROM posts p 
+      JOIN users u ON p.userId = u.id 
+      WHERE p.userId = ?
+      ORDER BY p.createdAt DESC
+      LIMIT ${connection.escape(limit)} OFFSET ${connection.escape(offset)}
+      `,
+      [parsedAuthorId]
+    );
+
+    // Lấy lượt thích và bình luận
+    const formattedPosts = await Promise.all(
+      posts.map(async (post) => {
+        try {
+          const [likes] = await connection.execute(
+            "SELECT userId FROM likes WHERE postId = ?",
+            [post.id]
+          );
+
+          const [comments] = await connection.execute(
+            `
+            SELECT c.*, u.fullName, u.imageAva 
+            FROM comments c 
+            LEFT JOIN users u ON c.userId = u.id 
+            WHERE c.postId = ? 
+            ORDER BY c.createdAt DESC
+            `,
+            [post.id]
+          );
+
+          return {
+            ...post,
+            image: post.image ? `/uploads/${post.image}` : null,
+            imageAva: post.imageAva ? `/uploads/${post.imageAva}` : null,
+            likes: likes.map((like) => ({ userId: like.userId })),
+            comments: comments.map((comment) => ({
+              id: comment.id,
+              content: comment.content,
+              createdAt: comment.createdAt,
+              user: {
+                id: comment.userId,
+                fullName: comment.fullName || "Unknown User",
+                imageAva: comment.imageAva
+                  ? `/uploads/${comment.imageAva}`
+                  : null
+              }
+            }))
+          };
+        } catch (error) {
+          console.error(`Error processing post ${post.id}:`, error);
+          return null;
+        }
+      })
+    ).then((results) => results.filter((result) => result !== null));
+
+    res.status(200).json({
+      posts: formattedPosts,
+      offset,
+      limit,
+      total
+    });
+  } catch (error) {
+    console.error("Error in getPostsByAuthor:", error);
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
   }
 };
 
@@ -1852,6 +1992,7 @@ module.exports = {
   getAuthUser,
   createPost,
   getPosts,
+  getPostsByAuthor,
   searchUsers,
   sendFriendRequest,
   getPendingFriendRequests,

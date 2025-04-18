@@ -23,6 +23,7 @@ router.post("/refresh-token", authController.refreshToken);
 router.get("/auth-user", authController.getAuthUser);
 router.post("/posts", authController.createPost(upload));
 router.get("/posts", authController.getPosts);
+router.get("/posts/author/:authorId", authController.getPostsByAuthor);
 router.get("/posts/:id", authController.getPostById);
 router.get("/search/users/:searchQuery", authController.searchUsers);
 router.post("/friends/request", authController.sendFriendRequest);
