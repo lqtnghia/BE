@@ -1665,50 +1665,74 @@ const getFriends = async (req, res) => {
 
 // Like một bài đăng
 const likePost = async (req, res) => {
+  console.log(
+    "LikePost - Request received:",
+    req.params,
+    req.headers.authorization
+  ); // Log để debug
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    console.log("LikePost - Missing or invalid Authorization header");
     return res.status(401).json({ message: "Không được phép truy cập" });
   }
 
   const token = authHeader.split(" ")[1];
-  const { postId } = req.params; // Lấy postId từ params
+  const { postId } = req.params;
   let connection;
 
   try {
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
     const userId = decoded.userId;
+    const parsedPostId = parseInt(postId, 10);
+
+    console.log(
+      "LikePost - userId:",
+      userId,
+      "postId:",
+      postId,
+      "parsedPostId:",
+      parsedPostId
+    );
+
+    if (isNaN(parsedPostId) || parsedPostId <= 0) {
+      console.log("LikePost - Invalid postId");
+      return res.status(400).json({ message: "ID bài đăng không hợp lệ" });
+    }
 
     connection = await db.getConnection();
-    await connection.beginTransaction();
 
-    // Kiểm tra xem bài đăng có tồn tại không
-    const [posts] = await connection.execute(
-      "SELECT * FROM posts WHERE id = ?",
-      [postId]
+    const [postResult] = await connection.execute(
+      "SELECT id FROM posts WHERE id = ?",
+      [parsedPostId]
     );
-    if (posts.length === 0) {
+    console.log("LikePost - Post query result:", postResult);
+
+    if (postResult.length === 0) {
+      console.log("LikePost - Post not found");
       return res.status(404).json({ message: "Bài đăng không tồn tại" });
     }
 
-    // Kiểm tra xem người dùng đã like bài đăng này chưa
-    const [existingLike] = await connection.execute(
-      "SELECT * FROM likes WHERE userId = ? AND postId = ?",
-      [userId, postId]
+    const [likeResult] = await connection.execute(
+      "SELECT id FROM likes WHERE userId = ? AND postId = ?",
+      [userId, parsedPostId]
     );
-    if (existingLike.length > 0) {
-      return res.status(400).json({ message: "Bạn đã thích bài đăng này rồi" });
+    console.log("LikePost - Like query result:", likeResult);
+
+    if (likeResult.length > 0) {
+      console.log("LikePost - Already liked");
+      return res.status(400).json({ message: "Bạn đã thích bài đăng này" });
     }
 
-    // Thêm lượt thích vào bảng likes
     await connection.execute(
       "INSERT INTO likes (userId, postId, createdAt) VALUES (?, ?, NOW())",
-      [userId, postId]
+      [userId, parsedPostId]
     );
 
-    await connection.commit();
+    console.log("LikePost - Like added successfully");
     res.status(201).json({ message: "Thích bài đăng thành công" });
   } catch (error) {
-    if (connection) await connection.rollback();
+    console.error("Error in likePost:", error);
     if (
       error.name === "TokenExpiredError" ||
       error.name === "JsonWebTokenError"
@@ -1729,44 +1753,48 @@ const unlikePost = async (req, res) => {
   }
 
   const token = authHeader.split(" ")[1];
-  const { postId } = req.params; // Lấy postId từ params
+  const { postId } = req.params;
   let connection;
 
   try {
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET);
+    // Xác thực token
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
     const userId = decoded.userId;
+    const parsedPostId = parseInt(postId, 10);
+
+    if (isNaN(parsedPostId) || parsedPostId <= 0) {
+      return res.status(400).json({ message: "ID bài đăng không hợp lệ" });
+    }
 
     connection = await db.getConnection();
-    await connection.beginTransaction();
 
-    // Kiểm tra xem bài đăng có tồn tại không
-    const [posts] = await connection.execute(
-      "SELECT * FROM posts WHERE id = ?",
-      [postId]
+    // Kiểm tra bài đăng có tồn tại không
+    const [postResult] = await connection.execute(
+      "SELECT id FROM posts WHERE id = ?",
+      [parsedPostId]
     );
-    if (posts.length === 0) {
+    if (postResult.length === 0) {
       return res.status(404).json({ message: "Bài đăng không tồn tại" });
     }
 
-    // Kiểm tra xem người dùng đã like bài đăng này chưa
-    const [existingLike] = await connection.execute(
-      "SELECT * FROM likes WHERE userId = ? AND postId = ?",
-      [userId, postId]
+    // Kiểm tra xem người dùng đã thích bài đăng chưa
+    const [likeResult] = await connection.execute(
+      "SELECT id FROM likes WHERE userId = ? AND postId = ?",
+      [userId, parsedPostId]
     );
-    if (existingLike.length === 0) {
-      return res.status(400).json({ message: "Bạn chưa thích bài đăng này" });
+    if (likeResult.length === 0) {
+      return res.status(404).json({ message: "Bạn chưa thích bài đăng này" });
     }
 
-    // Xóa lượt thích khỏi bảng likes
+    // Xóa lượt thích
     await connection.execute(
       "DELETE FROM likes WHERE userId = ? AND postId = ?",
-      [userId, postId]
+      [userId, parsedPostId]
     );
 
-    await connection.commit();
     res.status(200).json({ message: "Bỏ thích bài đăng thành công" });
   } catch (error) {
-    if (connection) await connection.rollback();
+    console.error("Error in unlikePost:", error);
     if (
       error.name === "TokenExpiredError" ||
       error.name === "JsonWebTokenError"
