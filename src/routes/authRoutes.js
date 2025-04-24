@@ -42,5 +42,10 @@ router.delete(
   authController.deleteComment
 );
 router.get("/users/:id", authController.getUserById);
+router.get("/messages", authController.getMessages);
+router.post("/messages/create", authController.createMessage);
+router.get("/messages/conversations", authController.getConversations);
+router.put("/messages/update-seen", authController.markMessagesAsSeen);
+router.get("/messages/unread-count", authController.getUnreadCount);
 
 module.exports = router;

@@ -2012,6 +2012,274 @@ const getUserById = async (req, res) => {
   }
 };
 
+// 1. GET /messages - Lấy lịch sử tin nhắn giữa hai người dùng
+const getMessages = async (req, res) => {
+  let connection;
+  try {
+    const decoded = validateAuth(req);
+    const currentUserId = decoded.userId;
+
+    const { userId } = req.query;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 20;
+
+    if (!userId) {
+      return res.status(400).json({ message: "userId là bắt buộc" });
+    }
+
+    connection = await db.getConnection();
+
+    // Lấy tin nhắn giữa người dùng hiện tại và người dùng được chỉ định
+    const [messages] = await connection.execute(
+      `
+      SELECT m.*, 
+             sender.fullName AS senderFullName, sender.email AS senderEmail, sender.imageAva AS senderImage,
+             receiver.fullName AS receiverFullName, receiver.email AS receiverEmail, receiver.imageAva AS receiverImage
+      FROM messages m
+      JOIN users sender ON m.senderId = sender.id
+      JOIN users receiver ON m.receiverId = receiver.id
+      WHERE (m.senderId = ? AND m.receiverId = ?) OR (m.senderId = ? AND m.receiverId = ?)
+      ORDER BY m.createdAt DESC
+      LIMIT ? OFFSET ?
+      `,
+      [currentUserId, userId, userId, currentUserId, limit, offset]
+    );
+
+    const formattedMessages = messages.map((msg) => ({
+      _id: msg.id.toString(),
+      sender: {
+        _id: msg.senderId.toString(),
+        fullName: msg.senderFullName,
+        email: msg.senderEmail,
+        role: "regular",
+        image: msg.senderImage ? `/uploads/${msg.senderImage}` : null
+      },
+      receiver: {
+        _id: msg.receiverId.toString(),
+        fullName: msg.receiverFullName,
+        email: msg.receiverEmail,
+        role: "regular",
+        image: msg.receiverImage ? `/uploads/${msg.receiverImage}` : null
+      },
+      message: msg.content,
+      seen: msg.seen,
+      createdAt: new Date(msg.createdAt).toISOString(),
+      updatedAt: new Date(msg.updatedAt).toISOString()
+    }));
+
+    res.status(200).json(formattedMessages);
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// 2. POST /messages/create - Tạo một tin nhắn mới
+const createMessage = async (req, res) => {
+  let connection;
+  try {
+    const decoded = validateAuth(req);
+    const currentUserId = decoded.userId;
+
+    const { message, receiver } = req.body;
+    if (!message || !receiver) {
+      return res
+        .status(400)
+        .json({ message: "Nội dung và người nhận là bắt buộc" });
+    }
+
+    connection = await db.getConnection();
+
+    // Kiểm tra xem người nhận có tồn tại không
+    const [receiverRows] = await connection.execute(
+      "SELECT id FROM users WHERE id = ?",
+      [receiver]
+    );
+    if (receiverRows.length === 0) {
+      return res.status(404).json({ message: "Người nhận không tồn tại" });
+    }
+
+    // Thêm tin nhắn mới vào cơ sở dữ liệu
+    const [result] = await connection.execute(
+      "INSERT INTO messages (senderId, receiverId, content, seen, createdAt, updatedAt) VALUES (?, ?, ?, ?, NOW(), NOW())",
+      [currentUserId, receiver, message, false]
+    );
+
+    // Gửi tin nhắn qua Socket.IO đến người nhận (real-time)
+    if (req.io) {
+      const [sender] = await connection.execute(
+        "SELECT fullName, imageAva FROM users WHERE id = ?",
+        [currentUserId]
+      );
+      const newMessage = {
+        _id: result.insertId.toString(),
+        sender: {
+          _id: currentUserId.toString(),
+          fullName: sender[0].fullName,
+          image: sender[0].imageAva ? `/uploads/${sender[0].imageAva}` : null
+        },
+        receiver: receiver.toString(),
+        message,
+        seen: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      req.io.to(receiver.toString()).emit("new-message", newMessage);
+    }
+
+    res.status(200).json({ message: "Tin nhắn được tạo thành công." });
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// 3. GET /messages/conversations - Lấy danh sách tất cả các cuộc trò chuyện
+const getConversations = async (req, res) => {
+  let connection;
+  try {
+    const decoded = validateAuth(req);
+    const currentUserId = decoded.userId;
+
+    connection = await db.getConnection();
+
+    // Lấy danh sách các cuộc trò chuyện (các người dùng mà người hiện tại đã nhắn tin hoặc nhận tin)
+    const [conversations] = await connection.execute(
+      `
+      SELECT DISTINCT u.id, u.fullName, u.email, u.imageAva,
+             m.content AS lastMessage, m.createdAt AS messageCreatedAt, m.senderId, m.seen
+      FROM messages m
+      JOIN users u ON (u.id = m.senderId OR u.id = m.receiverId)
+      WHERE (m.senderId = ? OR m.receiverId = ?)
+      AND u.id != ?
+      ORDER BY m.createdAt DESC
+      `,
+      [currentUserId, currentUserId, currentUserId]
+    );
+
+    const formattedConversations = conversations.map((conv) => ({
+      _id: conv.id.toString(),
+      message: {
+        message: conv.lastMessage,
+        createdAt: new Date(conv.messageCreatedAt).toISOString(),
+        sender: conv.senderId.toString()
+      },
+      sender: {
+        _id: conv.id.toString(),
+        fullName: conv.fullName,
+        email: conv.email,
+        role: "regular",
+        image: conv.imageAva ? `/uploads/${conv.imageAva}` : null
+      },
+      receiver: {
+        _id: currentUserId.toString()
+      },
+      seen: conv.seen
+    }));
+
+    res.status(200).json(formattedConversations);
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// 4. PUT /messages/update-seen - Đánh dấu tin nhắn đã xem
+const markMessagesAsSeen = async (req, res) => {
+  let connection;
+  try {
+    const decoded = validateAuth(req);
+    const currentUserId = decoded.userId;
+
+    const { sender } = req.body;
+    if (!sender) {
+      return res.status(400).json({ message: "sender là bắt buộc" });
+    }
+
+    connection = await db.getConnection();
+
+    // Cập nhật trạng thái tin nhắn từ người gửi đến người nhận là đã xem
+    await connection.execute(
+      "UPDATE messages SET seen = true WHERE senderId = ? AND receiverId = ? AND seen = false",
+      [sender, currentUserId]
+    );
+
+    res
+      .status(200)
+      .json({ message: "Tin nhắn được đánh dấu đã xem thành công." });
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// 5. GET /messages/unread-count - Lấy số lượng tin nhắn chưa đọc
+const getUnreadCount = async (req, res) => {
+  let connection;
+  try {
+    const decoded = validateAuth(req);
+    const currentUserId = decoded.userId;
+
+    connection = await db.getConnection();
+
+    // Đếm số tin nhắn chưa đọc, nhóm theo người gửi
+    const [unreadCounts] = await connection.execute(
+      `
+      SELECT senderId AS _id, COUNT(*) AS count
+      FROM messages
+      WHERE receiverId = ? AND seen = false
+      GROUP BY senderId
+      `,
+      [currentUserId]
+    );
+
+    const formattedCounts = unreadCounts.map((count) => ({
+      _id: count._id.toString(),
+      count: count.count
+    }));
+
+    res.status(200).json(formattedCounts);
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError"
+    ) {
+      return res.status(401).json({ message: "Không được phép truy cập" });
+    }
+    res.status(500).json({ message: "Lỗi máy chủ", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   signup,
   login,
@@ -2035,5 +2303,10 @@ module.exports = {
   unlikePost,
   addComment,
   deleteComment,
-  getUserById
+  getUserById,
+  getMessages,
+  createMessage,
+  getConversations,
+  markMessagesAsSeen,
+  getUnreadCount
 };
